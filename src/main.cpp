@@ -17,16 +17,29 @@
 #include <iomanip>
 #include <FreeRTOS.h>
 #include <task.h>
+#include <semphr.h>
 
-#define LED_PIN 10
+#define LED_PIN 25
 
 MCP23S17 mcp;
+static SemaphoreHandle_t mutex;
 
-using namespace std;
+/**
+ * @brief Printaout formated value
+ *
+ * @param value
+ */
+void printValue(int value, const char *theString)
+{
+    std::cout << theString << std::hex
+              << std::uppercase
+              << std::setw(2)
+              << std::setfill('0')
+              << value
+              << std::endl;
+}
 
-void printValue(int, const char *);
-
-void led10_task()
+void led_task()
 {
     gpio_init(LED_PIN);
     gpio_set_dir(LED_PIN, GPIO_OUT);
@@ -40,47 +53,76 @@ void led10_task()
     }
 }
 
-void mcp_out_task()
+void mcp_port_B_in_task()
 {
-    mcp.writeRegister(IODIRB, 0xFF);                    // port B (pins 1-7) all bits OUTPUT
-    mcp.writeRegister(IPOLB, 0xFF);                     // port B bits 7...0 inverted
-    mcp.writeRegister(GPPUB, 0xFF);                     // port B pull up all inputs.
-    const TickType_t xDelay = 500 / portTICK_PERIOD_MS; // 500ms
-    while(1)
+    uint8_t readResult;
+    uint8_t oldValue;
+    const TickType_t xDelay = 500 / portTICK_PERIOD_MS;
+    vTaskDelay(xDelay);
+    if (mutex != nullptr)
     {
-        vTaskDelay(xDelay * 2);
-        uint8_t readResult = mcp.readRegister(GPIOB); // read input direct via GPIO. No latch for inputs!
-        printValue((int)readResult, "Read Data Register GPIOB: 0x");
+        if (xSemaphoreTake(mutex, 10) == pdTRUE)
+        {
+            mcp.writeRegister(IODIRB, 0xFF); // port B (pins 1-7) all bits INPUT
+            mcp.writeRegister(IPOLB, 0xFF);  // port B bits 7...0 inverted
+            mcp.writeRegister(GPPUB, 0xFF);  // port B pull up all inputs.
+            readResult = mcp.readRegister(GPIOB);
+            xSemaphoreGive(mutex);
+        }
     }
-
-}
-
-void mcp_in_task()
-{
-    mcp.writeRegister(IODIRA, 0x00);                    // port A (pins 17-24) all bits INPUT
-    const TickType_t xDelay = 500 / portTICK_PERIOD_MS; // 500ms
+    oldValue = readResult;
     while (1)
     {
-        mcp.writeRegister(OLATA, 0xAA); // set output via latch register
-        vTaskDelay(xDelay * 2);
-        mcp.writeRegister(OLATA, 0x55); // set output via latch register
-        vTaskDelay(xDelay * 2);
+        vTaskDelay(xDelay / 5);
+        if (mutex != nullptr)
+        {
+            if (xSemaphoreTake(mutex, 10) == pdTRUE)
+            {
+                readResult = mcp.readRegister(GPIOB); // read input direct via GPIO. No latch for inputs!
+                xSemaphoreGive(mutex);
+            }
+        }
+        if (oldValue != readResult)
+        {
+            printValue((int)readResult, "Port B changed, readResult: 0x");
+        }
+        oldValue = readResult;
     }
 }
 
-/**
- * @brief Printaout formated value
- *
- * @param value
- */
-void printValue(int value, const char *theString)
+void mcp_port_A_out_task()
 {
-    cout << theString << hex
-         << uppercase
-         << setw(2)
-         << setfill('0')
-         << value
-         << endl;
+    if (mutex != nullptr)
+    {
+        if (xSemaphoreTake(mutex, 10) == pdTRUE)
+        {
+            mcp.writeRegister(IODIRA, 0x00); // port A (pins 17-24) all bits OUTPUT
+            xSemaphoreGive(mutex);
+        }
+    }
+    const TickType_t xDelay = 500 / portTICK_PERIOD_MS; // 500ms
+    vTaskDelay(xDelay * 3);
+    while (1)
+    {
+        if (mutex != nullptr)
+        {
+            if (xSemaphoreTake(mutex, 10) == pdTRUE)
+            {
+                mcp.writeRegister(OLATA, 0xAA); // set output via latch register
+                xSemaphoreGive(mutex);
+            }
+        }
+        vTaskDelay(xDelay * 2);
+        if (mutex != nullptr)
+        {
+            if (xSemaphoreTake(mutex, 10) == pdTRUE)
+            {
+                mcp.writeRegister(OLATA, 0x55); // set output via latch register
+                xSemaphoreGive(mutex);
+            }
+        }
+        vTaskDelay(xDelay * 2);
+    }
 }
 
 /**
@@ -91,9 +133,10 @@ void printValue(int value, const char *theString)
 int main(void)
 {
     stdio_init_all();
+    mutex = xSemaphoreCreateMutex();
     mcp.begin();
-    xTaskCreate((TaskFunction_t)led10_task, "LED10_TASK", 256, NULL, 1, NULL);
-    xTaskCreate((TaskFunction_t)mcp_in_task, "MCPIN_TASK", 256, NULL, 1, NULL);
-    xTaskCreate((TaskFunction_t)mcp_out_task, "MCPOUT_TASK", 256, NULL, 1, NULL);
+    xTaskCreate((TaskFunction_t)led_task, "LED_TASK", 256, NULL, 1, NULL);
+    xTaskCreate((TaskFunction_t)mcp_port_B_in_task, "MCPIN_TASK", 256, NULL, 1, NULL);
+    xTaskCreate((TaskFunction_t)mcp_port_A_out_task, "MCPOUT_TASK", 256, NULL, 1, NULL);
     vTaskStartScheduler();
 }
